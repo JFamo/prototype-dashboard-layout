@@ -78,22 +78,35 @@ function solveLayout(items: GridItem[], resizedId?: string): GridItem[] {
     }
   }
 
-  // Step 2: Assign x positions. Place the resizedId component first (user intent),
-  // then multi-row (more constrained), then single-row.
-  const resizedComp = resizedId ? result.filter(c => c.componentId === resizedId) : [];
-  const rest = result.filter(c => c.componentId !== resizedId);
-  const multiRow = rest.filter(c => c.height > 1).sort((a, b) => a.y - b.y || a.x - b.x);
-  const singleRow = rest.filter(c => c.height === 1).sort((a, b) => a.y - b.y || a.x - b.x);
-  const allByYX = [...resizedComp, ...multiRow, ...singleRow];
-
-  // Track occupied columns per row: occupied[y] = sorted list of {start, end}
+  // Step 2: Assign x positions by packing left-to-right.
+  // The resizedId component's requested x determines its position in the sort order
+  // (i.e., where it falls relative to other components), but all components are
+  // packed sequentially to avoid gaps.
+  // Process per-row-group: components sharing the same y-span are packed together.
+  const placed = new Set<string>();
   const occupied = new Map<number, { start: number; end: number; id: string }[]>();
 
-  for (const comp of allByYX) {
+  // Process multi-row components first (more constrained), but resizedId gets
+  // its sort position based on its requested x.
+  const byPriority = [...result].sort((a, b) => {
+    if (a.y !== b.y) return a.y - b.y;
+    if (a.x !== b.x) return a.x - b.x;
+    // resizedId wins ties — user placed it here intentionally
+    if (a.componentId === resizedId) return -1;
+    if (b.componentId === resizedId) return 1;
+    // Multi-row before single-row (more constrained)
+    const aMulti = a.height > 1 ? 0 : 1;
+    const bMulti = b.height > 1 ? 0 : 1;
+    return aMulti - bMulti;
+  });
+
+  for (const comp of byPriority) {
+    if (placed.has(comp.componentId)) continue;
+    placed.add(comp.componentId);
     const ref = result.find(r => r.componentId === comp.componentId)!;
 
     // Find the leftmost x where this component fits across ALL its rows
-    let bestX = 0;
+    let bestX = -1;
     for (let tryX = 0; tryX <= GRID_COLUMNS - ref.width; tryX++) {
       let fits = true;
       for (let r = ref.y; r < ref.y + ref.height; r++) {
@@ -101,22 +114,17 @@ function solveLayout(items: GridItem[], resizedId?: string): GridItem[] {
         for (const occ of rowOcc) {
           if (tryX < occ.end && tryX + ref.width > occ.start) {
             fits = false;
-            // Jump past this obstacle
-            tryX = Math.max(tryX, occ.end - 1); // -1 because loop increments
+            tryX = Math.max(tryX, occ.end - 1);
             break;
           }
         }
         if (!fits) break;
       }
-      if (fits) {
-        bestX = tryX;
-        break;
-      }
+      if (fits) { bestX = tryX; break; }
     }
-
+    if (bestX < 0) bestX = 0;
     ref.x = bestX;
 
-    // Mark occupied
     for (let r = ref.y; r < ref.y + ref.height; r++) {
       if (!occupied.has(r)) occupied.set(r, []);
       occupied.get(r)!.push({ start: ref.x, end: ref.x + ref.width, id: ref.componentId });
@@ -187,16 +195,14 @@ function pushDown(items: GridItem[]): GridItem[] {
 }
 
 // FR-021, FR-022: Gravity compaction
-function gravityCompact(items: GridItem[], anchorId?: string, anchorMinY?: number): GridItem[] {
+function gravityCompact(items: GridItem[]): GridItem[] {
   const result = items.map(i => ({ ...i }));
   let changed = true;
   while (changed) {
     changed = false;
     result.sort((a, b) => a.y - b.y);
     for (const comp of result) {
-      const minY = comp.componentId === anchorId && anchorMinY !== undefined
-        ? anchorMinY : 0;
-      for (let tryY = minY; tryY < comp.y; tryY++) {
+      for (let tryY = 0; tryY < comp.y; tryY++) {
         const test = { ...comp, y: tryY };
         const blocked = result.some(
           other => other.componentId !== comp.componentId && overlaps(test, other)
@@ -219,14 +225,10 @@ function gravityCompact(items: GridItem[], anchorId?: string, anchorMinY?: numbe
 // FR-024: Full stabilization loop
 export function stabilize(items: GridItem[], resizedId?: string): GridItem[] {
   let current = items.map(i => ({ ...i }));
-  // Capture the user's intended y for the resized component
-  const anchorMinY = resizedId
-    ? items.find(i => i.componentId === resizedId)?.y
-    : undefined;
   for (let iter = 0; iter < 20; iter++) {
     const solved = solveLayout(current, resizedId);
     const pushed = pushDown(solved);
-    const compacted = gravityCompact(pushed, resizedId, anchorMinY);
+    const compacted = gravityCompact(pushed);
     const next = solveLayout(compacted, resizedId);
 
     const stable = current.length === next.length && current.every(old => {
@@ -253,8 +255,12 @@ export function resizeLeftEdge(items: GridItem[], componentId: string, newX: num
 }
 
 export function resizeHeight(items: GridItem[], componentId: string, newHeight: number): GridItem[] {
-  return stabilize(items.map(i => i.componentId === componentId
-    ? { ...i, height: Math.max(1, Math.min(newHeight, MAX_COMPONENT_HEIGHT)) } : { ...i }), componentId);
+  const clamped = Math.max(1, Math.min(newHeight, MAX_COMPONENT_HEIGHT));
+  const result = items.map(i => i.componentId === componentId
+    ? { ...i, height: clamped } : { ...i });
+  // Only push overlapping items down, then compact. No width changes.
+  const pushed = pushDown(result);
+  return gravityCompact(pushed);
 }
 
 export function addComponent(items: GridItem[], newItem: GridItem): GridItem[] | null {
