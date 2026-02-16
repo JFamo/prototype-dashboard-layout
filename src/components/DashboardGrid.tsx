@@ -64,27 +64,22 @@ function computeDropZones(items: GridItem[], _dragWidth: number, dragHeight: num
       }
 
       // Left edge
-      if (sorted[0].x === 0) {
-        zones.push({
+      zones.push({
           x: 0,
           y: sorted[0].y,
           width: 1,
           height: Math.max(...sorted.map(c => c.height)),
           label: 'Left edge',
         });
-      }
 
       // Right edge
-      const last = sorted[sorted.length - 1];
-      if (last.x + last.width === GRID_COLUMNS) {
-        zones.push({
-          x: GRID_COLUMNS - 1,
-          y: sorted[0].y,
-          width: 1,
-          height: Math.max(...sorted.map(c => c.height)),
-          label: 'Right edge',
+      zones.push({
+        x: GRID_COLUMNS - 1,
+        y: sorted[0].y,
+        width: 1,
+        height: Math.max(...sorted.map(c => c.height)),
+        label: 'Right edge',
         });
-      }
     }
   }
 
