@@ -6,297 +6,161 @@ function overlaps(a: GridItem, b: GridItem): boolean {
     a.y < b.y + b.height && b.y < a.y + a.height;
 }
 
-function getOccupiedYs(items: GridItem[]): number[] {
-  const ys = new Set<number>();
-  for (const item of items) {
-    for (let r = item.y; r < item.y + item.height; r++) ys.add(r);
-  }
-  return [...ys].sort((a, b) => a - b);
+function canFit(items: GridItem[], x: number, y: number, w: number, h: number, excludeId?: string): boolean {
+  if (x < 0 || y < 0 || x + w > GRID_COLUMNS || h > MAX_COMPONENT_HEIGHT) return false;
+  const test = { x, y, width: w, height: h, componentId: '', componentType: '' as any };
+  return !items.some(i => i.componentId !== excludeId && overlaps(test, i));
 }
 
-function componentsAtY(items: GridItem[], y: number): GridItem[] {
-  return items.filter(item => item.y <= y && y < item.y + item.height);
-}
-
-function uniqueById(comps: GridItem[]): GridItem[] {
-  const seen = new Set<string>();
-  return comps.filter(c => { if (seen.has(c.componentId)) return false; seen.add(c.componentId); return true; });
-}
-
-// Sort components for a row: by x, with resizedId winning ties
-function rowSort(comps: GridItem[], resizedId?: string): GridItem[] {
-  return [...comps].sort((a, b) => {
-    if (a.x !== b.x) return a.x - b.x;
-    if (a.componentId === resizedId) return -1;
-    if (b.componentId === resizedId) return 1;
-    return 0;
-  });
-}
-
-// The core layout solver. Given items with potentially invalid positions/widths,
-// produces a valid layout where:
-// - No overlaps
-// - Every occupied y tiles full grid width
-// - Components float up (gravity)
-// - Multi-row components have consistent x/width across all rows
-function solveLayout(items: GridItem[], resizedId?: string): GridItem[] {
-  const result = items.map(i => ({ ...i }));
-
-  // Step 1: For each row, ensure total width <= GRID_COLUMNS by shrinking
-  for (const y of getOccupiedYs(result)) {
-    const atY = uniqueById(componentsAtY(result, y));
-    const sorted = rowSort(atY, resizedId);
-    const totalWidth = sorted.reduce((sum, c) => sum + c.width, 0);
-    if (totalWidth <= GRID_COLUMNS) continue;
-
-    let excess = totalWidth - GRID_COLUMNS;
-
-    // Distribute shrinking proportionally: each component keeps at least width 1,
-    // and shrinks proportional to its current width.
-    const totalShrinkable = sorted.reduce((s, c) => s + (result.find(r => r.componentId === c.componentId)!.width - 1), 0);
-    if (totalShrinkable > 0) {
-      let remaining = excess;
-      for (const comp of sorted) {
-        const ref = result.find(r => r.componentId === comp.componentId)!;
-        const shrinkable = ref.width - 1;
-        const share = Math.min(shrinkable, Math.round(excess * shrinkable / totalShrinkable));
-        ref.width -= Math.min(share, remaining);
-        remaining -= Math.min(share, remaining);
-      }
-      // Mop up any rounding remainder
-      if (remaining > 0) {
-        // Shrink non-resized components first
-        const order = sorted.filter(c => c.componentId !== resizedId).concat(sorted.filter(c => c.componentId === resizedId));
-        for (const comp of order) {
-          if (remaining <= 0) break;
-          const ref = result.find(r => r.componentId === comp.componentId)!;
-          const shrink = Math.min(ref.width - 1, remaining);
-          ref.width -= shrink;
-          remaining -= shrink;
-        }
+// Spiral outward from (cx, cy) to find nearest cell where component fits.
+// Returns {x, y} or null if nothing within reasonable range.
+export function findNearestFreeCell(
+  items: GridItem[], cx: number, cy: number, w: number, h: number, excludeId?: string
+): { x: number; y: number } | null {
+  const maxSearch = Math.max(GRID_COLUMNS, getMaxRow(items) + h + 10);
+  for (let d = 0; d <= maxSearch; d++) {
+    for (let dx = -d; dx <= d; dx++) {
+      for (let dy = -d; dy <= d; dy++) {
+        if (Math.abs(dx) !== d && Math.abs(dy) !== d) continue; // only perimeter
+        const x = cx + dx;
+        const y = cy + dy;
+        if (canFit(items, x, y, w, h, excludeId)) return { x, y };
       }
     }
   }
-
-  // Right-align: if any component's x + width exceeds grid, shift it left
-  for (const comp of result) {
-    if (comp.x + comp.width > GRID_COLUMNS) {
-      comp.x = GRID_COLUMNS - comp.width;
-    }
-  }
-
-  // Step 2: Assign x positions. Sort by y then x (resizedId wins ties).
-  // resizedId uses nearest-fit from its requested x; others use leftmost-fit.
-  const placed = new Set<string>();
-  const occupied = new Map<number, { start: number; end: number; id: string }[]>();
-
-  const byPriority = [...result].sort((a, b) => {
-    if (a.y !== b.y) return a.y - b.y;
-    if (a.x !== b.x) return a.x - b.x;
-    if (a.componentId === resizedId) return -1;
-    if (b.componentId === resizedId) return 1;
-    return 0;
-  });
-
-  for (const comp of byPriority) {
-    if (placed.has(comp.componentId)) continue;
-    placed.add(comp.componentId);
-    const ref = result.find(r => r.componentId === comp.componentId)!;
-
-    // Right-aligned components (right edge touches grid edge): scan from their x.
-    // All others: leftmost fit from x:0.
-    let bestX = -1;
-    const isRightAligned = ref.componentId === resizedId && ref.x + ref.width === GRID_COLUMNS;
-    if (isRightAligned) {
-      for (let tryX = ref.x; tryX <= GRID_COLUMNS - ref.width; tryX++) {
-        let fits = true;
-        for (let r = ref.y; r < ref.y + ref.height; r++) {
-          const rowOcc = occupied.get(r) || [];
-          for (const occ of rowOcc) {
-            if (tryX < occ.end && tryX + ref.width > occ.start) {
-              fits = false;
-              tryX = Math.max(tryX, occ.end - 1);
-              break;
-            }
-          }
-          if (!fits) break;
-        }
-        if (fits) { bestX = tryX; break; }
-      }
-    }
-    if (bestX < 0) {
-      for (let tryX = 0; tryX <= GRID_COLUMNS - ref.width; tryX++) {
-        let fits = true;
-        for (let r = ref.y; r < ref.y + ref.height; r++) {
-          const rowOcc = occupied.get(r) || [];
-          for (const occ of rowOcc) {
-            if (tryX < occ.end && tryX + ref.width > occ.start) {
-              fits = false;
-              tryX = Math.max(tryX, occ.end - 1);
-              break;
-            }
-          }
-          if (!fits) break;
-        }
-        if (fits) { bestX = tryX; break; }
-      }
-    }
-    if (bestX < 0) bestX = 0;
-    ref.x = bestX;
-
-    for (let r = ref.y; r < ref.y + ref.height; r++) {
-      if (!occupied.has(r)) occupied.set(r, []);
-      occupied.get(r)!.push({ start: ref.x, end: ref.x + ref.width, id: ref.componentId });
-      occupied.get(r)!.sort((a, b) => a.start - b.start);
-    }
-  }
-
-  // Step 3: Position movable (single-row) components into gaps around
-  // fixed (multi-row) components so they don't overlap, but do NOT
-  // expand widths to fill the row — components keep their natural size.
-  for (const y of getOccupiedYs(result)) {
-    const atY = uniqueById(componentsAtY(result, y)).sort((a, b) => a.x - b.x);
-
-    const fixed: GridItem[] = [];
-    const movable: GridItem[] = [];
-    for (const comp of atY) {
-      const ref = result.find(r => r.componentId === comp.componentId)!;
-      const spansOtherRows = ref.height > 1 || ref.y !== y;
-      if (spansOtherRows) fixed.push(ref);
-      else movable.push(ref);
-    }
-
-    if (movable.length > 0 && fixed.length > 0) {
-      // Build gaps around fixed components
-      const fixedRanges = fixed.map(f => ({ start: f.x, end: f.x + f.width })).sort((a, b) => a.start - b.start);
-      const gaps: { start: number; end: number }[] = [];
-      let cursor = 0;
-      for (const fr of fixedRanges) {
-        if (fr.start > cursor) gaps.push({ start: cursor, end: fr.start });
-        cursor = Math.max(cursor, fr.end);
-      }
-      if (cursor < GRID_COLUMNS) gaps.push({ start: cursor, end: GRID_COLUMNS });
-
-      // Place movable components into gaps at their natural width
-      let mi = 0;
-      for (const gap of gaps) {
-        let x = gap.start;
-        while (mi < movable.length && x + movable[mi].width <= gap.end) {
-          movable[mi].x = x;
-          x += movable[mi].width;
-          mi++;
-        }
-      }
-    }
-  }
-
-  return result;
+  return null;
 }
 
-// FR-020: Push-down overlapping components
-function pushDown(items: GridItem[]): GridItem[] {
-  const result = items.map(i => ({ ...i }));
-  let changed = true;
-  while (changed) {
-    changed = false;
-    for (let i = 0; i < result.length; i++) {
-      for (let j = i + 1; j < result.length; j++) {
-        if (overlaps(result[i], result[j])) {
-          const [upper, lower] = result[i].y <= result[j].y
-            ? [result[i], result[j]] : [result[j], result[i]];
-          lower.y = upper.y + upper.height;
-          changed = true;
-        }
-      }
-    }
-  }
-  return result;
+export function addComponent(items: GridItem[], newItem: GridItem): GridItem[] | null {
+  const pos = findNearestFreeCell(items, newItem.x, newItem.y, newItem.width, newItem.height);
+  if (!pos) return null;
+  return [...items, { ...newItem, x: pos.x, y: pos.y }];
 }
 
-// FR-021, FR-022: Gravity compaction
-function gravityCompact(items: GridItem[]): GridItem[] {
-  const result = items.map(i => ({ ...i }));
-  let changed = true;
-  while (changed) {
-    changed = false;
-    result.sort((a, b) => a.y - b.y);
-    for (const comp of result) {
-      for (let tryY = 0; tryY < comp.y; tryY++) {
-        const test = { ...comp, y: tryY };
-        const blocked = result.some(
-          other => other.componentId !== comp.componentId && overlaps(test, other)
-        );
-        if (!blocked) {
-          comp.y = tryY;
-          changed = true;
-          break;
-        }
-        const blocker = result.find(
-          other => other.componentId !== comp.componentId && overlaps({ ...comp, y: tryY }, other)
-        );
-        if (blocker) tryY = blocker.y + blocker.height - 1;
-      }
-    }
-  }
-  return result;
+export function removeComponent(items: GridItem[], componentId: string): GridItem[] {
+  return items.filter(i => i.componentId !== componentId);
 }
 
-// FR-024: Full stabilization loop
-export function stabilize(items: GridItem[], resizedId?: string): GridItem[] {
-  let current = items.map(i => ({ ...i }));
-  for (let iter = 0; iter < 20; iter++) {
-    const solved = solveLayout(current, resizedId);
-    const pushed = pushDown(solved);
-    const compacted = gravityCompact(pushed);
-    const next = solveLayout(compacted, resizedId);
-
-    const stable = current.length === next.length && current.every(old => {
-      const n = next.find(u => u.componentId === old.componentId);
-      return n && n.x === old.x && n.y === old.y && n.width === old.width && n.height === old.height;
-    });
-    current = next;
-    if (stable) break;
-  }
-  return current;
-}
-
-export function resizeWidth(items: GridItem[], componentId: string, newWidth: number): GridItem[] {
-  return stabilize(items.map(i => i.componentId === componentId
-    ? { ...i, width: Math.max(1, Math.min(newWidth, GRID_COLUMNS)) } : { ...i }), componentId);
+export function repositionComponent(items: GridItem[], componentId: string, newX: number, newY: number): GridItem[] | null {
+  const comp = items.find(i => i.componentId === componentId);
+  if (!comp) return null;
+  const others = items.filter(i => i.componentId !== componentId);
+  const pos = findNearestFreeCell(others, newX, newY, comp.width, comp.height);
+  if (!pos) return null;
+  return [...others, { ...comp, x: pos.x, y: pos.y }];
 }
 
 export function resizeLeftEdge(items: GridItem[], componentId: string, newX: number): GridItem[] {
   const comp = items.find(i => i.componentId === componentId);
   if (!comp) return items;
   const clampedX = Math.max(0, Math.min(newX, comp.x + comp.width - 1));
-  return stabilize(items.map(i => i.componentId === componentId
-    ? { ...i, x: clampedX, width: comp.x + comp.width - clampedX } : { ...i }), componentId);
+  const newWidth = comp.x + comp.width - clampedX;
+  const others = items.filter(i => i.componentId !== componentId);
+  if (canFit(others, clampedX, comp.y, newWidth, comp.height)) {
+    return [...others, { ...comp, x: clampedX, width: newWidth }];
+  }
+  // Push items to the left
+  const result = others.map(i => ({ ...i }));
+  const resized = { ...comp, x: clampedX, width: newWidth };
+  const vOverlaps = (a: GridItem, b: GridItem) =>
+    a.y < b.y + b.height && b.y < a.y + a.height;
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const item of result.sort((a, b) => b.x - a.x)) {
+      // Pushed by resized component
+      if (vOverlaps(resized, item) && resized.x < item.x + item.width && item.x < resized.x + resized.width) {
+        const newItemX = resized.x - item.width;
+        if (newItemX !== item.x) { item.x = newItemX; changed = true; }
+      }
+      // Cascade: pushed by other shifted items
+      for (const other of result) {
+        if (other.componentId === item.componentId) continue;
+        if (vOverlaps(item, other) && item.x < other.x + other.width && other.x < item.x + item.width) {
+          const newOtherX = Math.min(other.x, item.x - other.width);
+          if (newOtherX !== other.x) { other.x = newOtherX; changed = true; }
+        }
+      }
+    }
+  }
+  if (result.some(i => i.x < 0)) return items;
+  return [...result, resized];
+}
+
+export function resizeWidth(items: GridItem[], componentId: string, newWidth: number): GridItem[] {
+  const comp = items.find(i => i.componentId === componentId);
+  if (!comp) return items;
+  const clamped = Math.max(1, Math.min(newWidth, GRID_COLUMNS));
+  const others = items.filter(i => i.componentId !== componentId);
+  if (canFit(others, comp.x, comp.y, clamped, comp.height)) {
+    return [...others, { ...comp, width: clamped }];
+  }
+  // Try pushing items to the right
+  const result = others.map(i => ({ ...i }));
+  const resized = { ...comp, width: clamped };
+  // Iteratively push: process items left-to-right that vertically overlap the resized comp
+  const vOverlaps = (a: GridItem, b: GridItem) =>
+    a.y < b.y + b.height && b.y < a.y + a.height;
+  let changed = true;
+  while (changed) {
+    changed = false;
+    // Sort right-side items by x so we cascade left-to-right
+    for (const item of result.sort((a, b) => a.x - b.x)) {
+      // Check overlap with resized component
+      if (vOverlaps(resized, item) && resized.x + resized.width > item.x && item.x + item.width > resized.x) {
+        const newX = resized.x + resized.width;
+        if (newX !== item.x) { item.x = newX; changed = true; }
+      }
+      // Check overlap with other pushed items
+      for (const other of result) {
+        if (other.componentId === item.componentId) continue;
+        if (vOverlaps(item, other) && item.x + item.width > other.x && other.x + other.width > item.x && other.x < item.x + item.width) {
+          const newX = Math.max(other.x, item.x + item.width);
+          if (newX !== other.x) { other.x = newX; changed = true; }
+        }
+      }
+    }
+  }
+  // Reject if any item went out of bounds
+  if (result.some(i => i.x + i.width > GRID_COLUMNS)) return items;
+  return [...result, resized];
 }
 
 export function resizeHeight(items: GridItem[], componentId: string, newHeight: number): GridItem[] {
-  const clamped = Math.max(1, Math.min(newHeight, MAX_COMPONENT_HEIGHT));
-  const result = items.map(i => i.componentId === componentId
-    ? { ...i, height: clamped } : { ...i });
-  // Only push overlapping items down, then compact. No width changes.
-  const pushed = pushDown(result);
-  return gravityCompact(pushed);
-}
-
-export function addComponent(items: GridItem[], newItem: GridItem): GridItem[] | null {
-  const atY = componentsAtY(items, newItem.y);
-  if (atY.length + 1 > GRID_COLUMNS) return null;
-  return stabilize([...items.map(i => ({ ...i })), { ...newItem }], newItem.componentId);
-}
-
-export function removeComponent(items: GridItem[], componentId: string): GridItem[] {
-  return stabilize(items.filter(i => i.componentId !== componentId));
-}
-
-export function repositionComponent(items: GridItem[], componentId: string, newX: number, newY: number): GridItem[] {
   const comp = items.find(i => i.componentId === componentId);
   if (!comp) return items;
-  const without = items.filter(i => i.componentId !== componentId);
-  return stabilize([...without.map(i => ({ ...i })), { ...comp, x: newX, y: newY }], componentId);
+  const clamped = Math.max(1, Math.min(newHeight, MAX_COMPONENT_HEIGHT));
+  const others = items.filter(i => i.componentId !== componentId);
+  if (canFit(others, comp.x, comp.y, comp.width, clamped)) {
+    return [...others, { ...comp, height: clamped }];
+  }
+  // Try pushing items downward
+  const result = others.map(i => ({ ...i }));
+  const resized = { ...comp, height: clamped };
+  const hOverlaps = (a: GridItem, b: GridItem) =>
+    a.x < b.x + b.width && b.x < a.x + a.width;
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const item of result.sort((a, b) => a.y - b.y)) {
+      if (hOverlaps(resized, item) && resized.y + resized.height > item.y && item.y + item.height > resized.y) {
+        const newY = resized.y + resized.height;
+        if (newY !== item.y) { item.y = newY; changed = true; }
+      }
+      for (const other of result) {
+        if (other.componentId === item.componentId) continue;
+        if (hOverlaps(item, other) && item.y + item.height > other.y && other.y + other.height > item.y && other.y < item.y + item.height) {
+          const newY = Math.max(other.y, item.y + item.height);
+          if (newY !== other.y) { other.y = newY; changed = true; }
+        }
+      }
+    }
+  }
+  return [...result, resized];
+}
+
+export function getMaxRow(items: GridItem[]): number {
+  return items.length === 0 ? 0 : Math.max(...items.map(i => i.y + i.height));
 }
 
 export function migrateOldFormat(rows: { items: { componentId: string; componentType: string }[] }[]): GridItem[] {
@@ -319,8 +183,4 @@ export function migrateOldFormat(rows: { items: { componentId: string; component
     }
   }
   return result;
-}
-
-export function getMaxRow(items: GridItem[]): number {
-  return items.length === 0 ? 0 : Math.max(...items.map(i => i.y + i.height));
 }

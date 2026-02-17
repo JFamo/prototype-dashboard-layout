@@ -4,15 +4,12 @@ import { HTML5Backend } from 'react-dnd-html5-backend';
 import type { GridItem } from './types';
 import { DashboardGrid } from './components/DashboardGrid';
 import { Palette } from './components/Palette';
-import { stabilize } from './layoutEngine';
-
-// Sample dashboard matching the spec's example
-const INITIAL_ITEMS: GridItem[] = stabilize([
+const INITIAL_ITEMS: GridItem[] = [
   { componentId: 'chart-a', componentType: 'Chart', x: 0, y: 0, width: 6, height: 2 },
   { componentId: 'chart-b', componentType: 'KPI', x: 6, y: 0, width: 6, height: 1 },
   { componentId: 'kpi-c', componentType: 'StylizedKPIGraph', x: 6, y: 1, width: 6, height: 1 },
   { componentId: 'grid-d', componentType: 'Grid', x: 0, y: 2, width: 12, height: 3 },
-]);
+];
 
 function App() {
   const [items, setItems] = useState<GridItem[]>(INITIAL_ITEMS);

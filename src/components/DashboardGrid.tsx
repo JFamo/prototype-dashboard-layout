@@ -4,9 +4,11 @@ import type { GridItem, ComponentType } from '../types';
 import { CELL_HEIGHT_PX, GRID_COLUMNS, MOBILE_BREAKPOINT_PX } from '../constants';
 import {
   resizeWidth,
+  resizeLeftEdge,
   resizeHeight,
   addComponent,
   removeComponent,
+  repositionComponent,
   getMaxRow,
 } from '../layoutEngine';
 import { validateLayout } from '../validateLayout';
@@ -17,143 +19,13 @@ interface Props {
   onChange: (items: GridItem[]) => void;
 }
 
-interface DropZone {
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-  label: string;
-}
-
 let idCounter = 100;
-
-// FR-028: Compute visible drop zones from current layout
-function computeDropZones(items: GridItem[], _dragWidth: number, dragHeight: number): DropZone[] {
-  const zones: DropZone[] = [];
-  const maxRow = items.length === 0 ? 0 : Math.max(...items.map((i) => i.y + i.height));
-
-  const rowBands = new Map<number, GridItem[]>();
-  for (const item of items) {
-    for (let r = item.y; r < item.y + item.height; r++) {
-      if (!rowBands.has(r)) rowBands.set(r, []);
-      rowBands.get(r)!.push(item);
-    }
-  }
-
-  const processedRows = new Set<string>();
-  for (const [, comps] of rowBands) {
-    const sorted = [...new Map(comps.map(c => [c.componentId, c])).values()].sort((a, b) => a.x - b.x);
-    const key = sorted.map(c => c.componentId).join(',');
-    if (processedRows.has(key)) continue;
-    processedRows.add(key);
-
-    if (sorted.length < GRID_COLUMNS) {
-      // Between each pair of adjacent components
-      for (let i = 0; i < sorted.length - 1; i++) {
-        const left = sorted[i];
-        const right = sorted[i + 1];
-        const midX = left.x + left.width;
-        zones.push({
-          x: midX,
-          y: sorted[0].y,
-          width: Math.max(1, right.x - midX) || 1,
-          height: Math.max(...sorted.map(c => c.height)),
-          label: `Between ${left.componentType} & ${right.componentType}`,
-        });
-      }
-
-      // Left edge
-      zones.push({
-          x: 0,
-          y: sorted[0].y,
-          width: 1,
-          height: Math.max(...sorted.map(c => c.height)),
-          label: 'Left edge',
-        });
-
-      // Right edge
-      zones.push({
-        x: GRID_COLUMNS - 1,
-        y: sorted[0].y,
-        width: 1,
-        height: Math.max(...sorted.map(c => c.height)),
-        label: 'Right edge',
-        });
-    }
-  }
-
-  // "Below" zones: for each component, if there's open space directly below it
-  for (const item of items) {
-    const belowY = item.y + item.height;
-    // Check if any component occupies the space at belowY within this item's x range
-    const blocked = items.some(other =>
-      other.componentId !== item.componentId &&
-      other.y <= belowY && belowY < other.y + other.height &&
-      other.x < item.x + item.width && item.x < other.x + other.width
-    );
-    if (!blocked) {
-      zones.push({
-        x: item.x,
-        y: belowY,
-        width: item.width,
-        height: dragHeight,
-        label: `Below ${item.componentType}`,
-      });
-    }
-  }
-
-  // Between row groups
-  const occupiedYs = [...new Set(items.flatMap(i => Array.from({ length: i.height }, (_, k) => i.y + k)))].sort((a, b) => a - b);
-  if (occupiedYs.length > 0) {
-    const rowGroups: number[][] = [];
-    let group = [occupiedYs[0]];
-    for (let i = 1; i < occupiedYs.length; i++) {
-      if (occupiedYs[i] === occupiedYs[i - 1] + 1) {
-        group.push(occupiedYs[i]);
-      } else {
-        rowGroups.push(group);
-        group = [occupiedYs[i]];
-      }
-    }
-    rowGroups.push(group);
-
-    for (let i = 0; i < rowGroups.length - 1; i++) {
-      const betweenY = rowGroups[i][rowGroups[i].length - 1] + 1;
-      zones.push({ x: 0, y: betweenY, width: GRID_COLUMNS, height: dragHeight, label: 'New row' });
-    }
-  }
-
-  // Below all
-  zones.push({ x: 0, y: maxRow, width: GRID_COLUMNS, height: dragHeight, label: 'Below all' });
-
-  return zones;
-}
-
-// Find which drop zone the cursor is over, or the closest one
-function hitTestZone(zones: DropZone[], relX: number, relY: number, colPx: number): number {
-  let bestIdx = -1;
-  let bestDist = Infinity;
-  for (let i = 0; i < zones.length; i++) {
-    const z = zones[i];
-    const left = z.x * colPx;
-    const top = z.y * CELL_HEIGHT_PX;
-    const right = left + z.width * colPx;
-    const bottom = top + z.height * CELL_HEIGHT_PX;
-    if (relX >= left && relX < right && relY >= top && relY < bottom) return i;
-    // Distance to zone center
-    const cx = (left + right) / 2;
-    const cy = (top + bottom) / 2;
-    const dist = (relX - cx) ** 2 + (relY - cy) ** 2;
-    if (dist < bestDist) { bestDist = dist; bestIdx = i; }
-  }
-  return bestIdx;
-}
 
 export const DashboardGrid: React.FC<Props> = ({ items, onChange }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const [containerWidth, setContainerWidth] = useState(960);
   const [isMobile, setIsMobile] = useState(false);
-  const [hoveredZone, setHoveredZone] = useState(-1);
+  const [rejected, setRejected] = useState(false);
 
   useEffect(() => {
     const measure = () => {
@@ -169,8 +41,20 @@ export const DashboardGrid: React.FC<Props> = ({ items, onChange }) => {
     return () => observer.disconnect();
   }, []);
 
+  const colPx = containerWidth / GRID_COLUMNS;
+
+  // Flash rejection indicator
+  const flashReject = useCallback(() => {
+    setRejected(true);
+    setTimeout(() => setRejected(false), 600);
+  }, []);
+
   const handleResizeWidth = useCallback(
     (id: string, newWidth: number) => onChange(resizeWidth(items, id, newWidth)),
+    [items, onChange]
+  );
+  const handleResizeLeftEdge = useCallback(
+    (id: string, newX: number) => onChange(resizeLeftEdge(items, id, newX)),
     [items, onChange]
   );
   const handleResizeHeight = useCallback(
@@ -182,68 +66,41 @@ export const DashboardGrid: React.FC<Props> = ({ items, onChange }) => {
     [items, onChange]
   );
 
-  // Memoize colPx so it's available in useDrop
-  const colPx = containerWidth / GRID_COLUMNS;
-
-  // We need dropZones available inside useDrop, so compute them via ref
-  const dropZonesRef = useRef<DropZone[]>([]);
-
-  const [{ isDraggingAny, dragItem, dragItemType }, dropRef] = useDrop(
+  const [{ isDraggingAny }, dropRef] = useDrop(
     () => ({
       accept: ['PALETTE_ITEM', 'GRID_ITEM'],
       collect: (monitor) => ({
         isDraggingAny: monitor.canDrop() && !!monitor.getItemType(),
-        dragItem: monitor.getItem() as { componentId?: string; componentType?: string; width?: number; height?: number } | null,
-        dragItemType: monitor.getItemType() as string | null,
       }),
-      hover: (_dragItem: any, monitor) => {
-        const offset = monitor.getClientOffset();
-        const rect = containerRef.current?.getBoundingClientRect();
-        if (!offset || !rect) { setHoveredZone(-1); return; }
-        const idx = hitTestZone(dropZonesRef.current, offset.x - rect.left, offset.y - rect.top, colPx);
-        setHoveredZone(idx);
-      },
       drop: (dragItem: any, monitor) => {
         if (isMobile) return;
-        setHoveredZone(-1);
         const offset = monitor.getClientOffset();
         const rect = containerRef.current?.getBoundingClientRect();
         if (!offset || !rect) return;
 
-        const relX = offset.x - rect.left;
-        const relY = offset.y - rect.top;
-
-        // Snap to hovered drop zone if cursor is over one
-        const zoneIdx = hitTestZone(dropZonesRef.current, relX, relY, colPx);
-        const zone = zoneIdx >= 0 ? dropZonesRef.current[zoneIdx] : null;
-        const rawDropX = zone ? zone.x : Math.max(0, Math.min(Math.floor(relX / colPx), GRID_COLUMNS - 1));
-        const dropY = zone ? zone.y : Math.max(0, Math.floor(relY / CELL_HEIGHT_PX));
-
-        // For right-edge drops, right-align the component
-        const dropX = zone?.label === 'Right edge' ? GRID_COLUMNS : rawDropX;
+        const gridX = Math.max(0, Math.floor((offset.x - rect.left) / colPx));
+        const gridY = Math.max(0, Math.floor((offset.y - rect.top) / CELL_HEIGHT_PX));
 
         if (monitor.getItemType() === 'PALETTE_ITEM') {
           const newItem: GridItem = {
             componentId: `comp-${++idCounter}`,
             componentType: dragItem.componentType as ComponentType,
-            x: dropX,
-            y: dropY,
+            x: gridX,
+            y: gridY,
             width: dragItem.width,
             height: dragItem.height,
           };
           const result = addComponent(items, newItem);
           if (result) onChange(result);
+          else flashReject();
         } else {
-          const comp = items.find(i => i.componentId === dragItem.componentId);
-          if (!comp) return;
-          const without = items.filter(i => i.componentId !== dragItem.componentId);
-          const moved: GridItem = { ...comp, x: dropX, y: dropY };
-          const result = addComponent(without, moved);
+          const result = repositionComponent(items, dragItem.componentId, gridX, gridY);
           if (result) onChange(result);
+          else flashReject();
         }
       },
     }),
-    [items, onChange, colPx, isMobile]
+    [items, onChange, colPx, isMobile, flashReject]
   );
 
   const maxRow = getMaxRow(items);
@@ -255,26 +112,8 @@ export const DashboardGrid: React.FC<Props> = ({ items, onChange }) => {
     [violations]
   );
   useEffect(() => {
-    if (violations.length > 0) {
-      console.error('[LAYOUT BUG] Invariant violations detected:', violations);
-    }
+    if (violations.length > 0) console.error('[LAYOUT BUG]', violations);
   }, [violations]);
-
-  // Compute drop zones
-  const showDropZones = isDraggingAny && !isMobile;
-  const dragW = dragItem?.width ?? 6;
-  const dragH = dragItem?.height ?? 1;
-  const zoneItems = showDropZones && dragItemType === 'GRID_ITEM' && dragItem?.componentId
-    ? items.filter(i => i.componentId !== dragItem.componentId)
-    : items;
-  const dropZones = useMemo(
-    () => showDropZones ? computeDropZones(zoneItems, dragW, dragH) : [],
-    [showDropZones, zoneItems, dragW, dragH]
-  );
-  dropZonesRef.current = dropZones;
-
-  // Reset hovered zone when not dragging
-  useEffect(() => { if (!showDropZones) setHoveredZone(-1); }, [showDropZones]);
 
   const mobileItems = isMobile
     ? [...items].sort((a, b) => a.y - b.y || a.x - b.x)
@@ -290,9 +129,8 @@ export const DashboardGrid: React.FC<Props> = ({ items, onChange }) => {
         position: 'relative',
         flex: 1,
         minHeight: isMobile ? undefined : gridHeight,
-        background: isMobile ? '#f5f5f5' : undefined,
+        background: rejected ? 'rgba(211, 47, 47, 0.08)' : isMobile ? '#f5f5f5' : undefined,
         transition: 'background 0.15s',
-        ...(showDropZones ? { background: 'rgba(0,0,0,0.02)' } : {}),
       }}
     >
       {/* Grid lines */}
@@ -302,7 +140,7 @@ export const DashboardGrid: React.FC<Props> = ({ items, onChange }) => {
             key={`col-${i}`}
             style={{
               position: 'absolute', left: i * colPx, top: 0, bottom: 0, width: 1,
-              background: showDropZones ? 'rgba(74,144,217,0.12)' : 'rgba(0,0,0,0.05)',
+              background: isDraggingAny ? 'rgba(74,144,217,0.12)' : 'rgba(0,0,0,0.05)',
               pointerEvents: 'none',
             }}
           />
@@ -313,52 +151,23 @@ export const DashboardGrid: React.FC<Props> = ({ items, onChange }) => {
             key={`row-${i}`}
             style={{
               position: 'absolute', top: i * CELL_HEIGHT_PX, left: 0, right: 0, height: 1,
-              background: showDropZones ? 'rgba(74,144,217,0.12)' : 'rgba(0,0,0,0.05)',
+              background: isDraggingAny ? 'rgba(74,144,217,0.12)' : 'rgba(0,0,0,0.05)',
               pointerEvents: 'none',
             }}
           />
         ))}
 
-      {/* FR-030: Drop zone indicators with hover highlight */}
-      {showDropZones &&
-        dropZones.map((zone, i) => {
-          const isHovered = i === hoveredZone;
-          return (
-            <div
-              key={`dz-${i}`}
-              style={{
-                position: 'absolute',
-                left: zone.x * colPx,
-                top: zone.y * CELL_HEIGHT_PX,
-                width: zone.width * colPx,
-                height: zone.height * CELL_HEIGHT_PX,
-                background: isHovered ? 'rgba(74, 144, 217, 0.3)' : 'rgba(74, 144, 217, 0.08)',
-                border: isHovered ? '2px solid rgba(74, 144, 217, 0.9)' : '2px dashed rgba(74, 144, 217, 0.4)',
-                borderRadius: 4,
-                boxSizing: 'border-box',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                pointerEvents: 'none',
-                zIndex: 5,
-                transition: 'background 0.1s, border 0.1s',
-              }}
-            >
-              <span
-                style={{
-                  fontSize: 11,
-                  color: isHovered ? 'rgba(74, 144, 217, 1)' : 'rgba(74, 144, 217, 0.7)',
-                  fontFamily: 'sans-serif',
-                  fontWeight: isHovered ? 700 : 500,
-                  textAlign: 'center',
-                  padding: '0 4px',
-                }}
-              >
-                {zone.label}
-              </span>
-            </div>
-          );
-        })}
+      {/* Rejection flash */}
+      {rejected && (
+        <div style={{
+          position: 'absolute', top: 8, left: '50%', transform: 'translateX(-50%)',
+          background: '#d32f2f', color: '#fff', padding: '6px 16px', borderRadius: 4,
+          fontFamily: 'sans-serif', fontSize: 13, zIndex: 50, pointerEvents: 'none',
+          animation: 'fadeOut 0.6s forwards',
+        }}>
+          Cannot place here
+        </div>
+      )}
 
       {mobileItems.map((item) => (
         <GridCell
@@ -366,6 +175,7 @@ export const DashboardGrid: React.FC<Props> = ({ items, onChange }) => {
           item={item}
           containerWidth={containerWidth}
           onResizeWidth={handleResizeWidth}
+          onResizeLeftEdge={handleResizeLeftEdge}
           onResizeHeight={handleResizeHeight}
           onRemove={handleRemove}
           isMobile={isMobile}
@@ -379,14 +189,14 @@ export const DashboardGrid: React.FC<Props> = ({ items, onChange }) => {
           background: '#d32f2f', color: '#fff', padding: '8px 16px',
           fontFamily: 'sans-serif', fontSize: 12,
         }}>
-          <strong>⚠ Layout Bug Detected ({violations.length} violation{violations.length > 1 ? 's' : ''}):</strong>
+          <strong>⚠ Layout Bug ({violations.length}):</strong>
           {violations.map((v, i) => (
             <div key={i} style={{ marginTop: 2 }}>{v.message}</div>
           ))}
         </div>
       )}
 
-      {items.length === 0 && !showDropZones && (
+      {items.length === 0 && (
         <div style={{
           position: 'absolute', inset: 0, display: 'flex',
           alignItems: 'center', justifyContent: 'center',
@@ -395,6 +205,8 @@ export const DashboardGrid: React.FC<Props> = ({ items, onChange }) => {
           Drag components here
         </div>
       )}
+
+      <style>{`@keyframes fadeOut { from { opacity: 1; } to { opacity: 0; } }`}</style>
     </div>
   );
 };
