@@ -12,21 +12,14 @@ function canFit(items: GridItem[], x: number, y: number, w: number, h: number, e
   return !items.some(i => i.componentId !== excludeId && overlaps(test, i));
 }
 
-// Spiral outward from (cx, cy) to find nearest cell where component fits.
+// Search downward from (cx, cy) to find the nearest row where the component fits.
 // Returns {x, y} or null if nothing within reasonable range.
 export function findNearestFreeCell(
   items: GridItem[], cx: number, cy: number, w: number, h: number, excludeId?: string
 ): { x: number; y: number } | null {
-  const maxSearch = Math.max(GRID_COLUMNS, getMaxRow(items) + h + 10);
-  for (let d = 0; d <= maxSearch; d++) {
-    for (let dx = -d; dx <= d; dx++) {
-      for (let dy = -d; dy <= d; dy++) {
-        if (Math.abs(dx) !== d && Math.abs(dy) !== d) continue; // only perimeter
-        const x = cx + dx;
-        const y = cy + dy;
-        if (canFit(items, x, y, w, h, excludeId)) return { x, y };
-      }
-    }
+  const maxY = getMaxRow(items) + h + 10;
+  for (let y = cy; y <= maxY; y++) {
+    if (canFit(items, cx, y, w, h, excludeId)) return { x: cx, y };
   }
   return null;
 }
@@ -134,29 +127,46 @@ export function resizeHeight(items: GridItem[], componentId: string, newHeight: 
   if (canFit(others, comp.x, comp.y, comp.width, clamped)) {
     return [...others, { ...comp, height: clamped }];
   }
-  // Try pushing items downward
+  if (clamped <= comp.height) return [...others, { ...comp, height: clamped }];
+
   const result = others.map(i => ({ ...i }));
-  const resized = { ...comp, height: clamped };
-  const hOverlaps = (a: GridItem, b: GridItem) =>
-    a.x < b.x + b.width && b.x < a.x + a.width;
-  let changed = true;
-  while (changed) {
-    changed = false;
-    for (const item of result.sort((a, b) => a.y - b.y)) {
-      if (hOverlaps(resized, item) && resized.y + resized.height > item.y && item.y + item.height > resized.y) {
-        const newY = resized.y + resized.height;
-        if (newY !== item.y) { item.y = newY; changed = true; }
+
+  // Recursive push: when a component is pushed down, anything below IT (in its columns) must also move
+  const pushed = new Set<string>();
+  function pushDown(srcX: number, srcWidth: number, oldBottom: number, newBottom: number) {
+    const delta = newBottom - oldBottom;
+    if (delta <= 0) return;
+    for (const item of result) {
+      if (pushed.has(item.componentId)) continue;
+      const hOverlap = srcX < item.x + item.width && item.x < srcX + srcWidth;
+      if (!hOverlap) continue;
+      // Item is in the zone that got expanded into
+      if (item.y >= oldBottom && item.y < newBottom) {
+        pushed.add(item.componentId);
+        const prevBottom = item.y + item.height;
+        item.y = newBottom;
+        // Recursively push items below this (now wider) pushed item
+        pushDown(item.x, item.width, prevBottom, item.y + item.height);
       }
-      for (const other of result) {
-        if (other.componentId === item.componentId) continue;
-        if (hOverlaps(item, other) && item.y + item.height > other.y && other.y + other.height > item.y && other.y < item.y + item.height) {
-          const newY = Math.max(other.y, item.y + item.height);
-          if (newY !== other.y) { other.y = newY; changed = true; }
-        }
+      // Item is below the old bottom — shift by delta
+      else if (item.y >= oldBottom) {
+        pushed.add(item.componentId);
+        const prevBottom = item.y + item.height;
+        item.y += delta;
+        pushDown(item.x, item.width, prevBottom, item.y + item.height);
+      }
+      // Item partially overlaps the resize zone
+      else if (item.y < newBottom && item.y + item.height > oldBottom) {
+        pushed.add(item.componentId);
+        const prevBottom = item.y + item.height;
+        item.y = newBottom;
+        pushDown(item.x, item.width, prevBottom, item.y + item.height);
       }
     }
   }
-  return [...result, resized];
+
+  pushDown(comp.x, comp.width, comp.y + comp.height, comp.y + clamped);
+  return [...result, { ...comp, height: clamped }];
 }
 
 export function getMaxRow(items: GridItem[]): number {
