@@ -7,7 +7,6 @@ interface Props {
   item: GridItem;
   containerWidth: number;
   onResizeWidth: (id: string, newWidth: number) => void;
-  onResizeLeftEdge: (id: string, newX: number) => void;
   onResizeHeight: (id: string, newHeight: number) => void;
   onRemove: (id: string) => void;
   isMobile: boolean;
@@ -25,7 +24,6 @@ export const GridCell: React.FC<Props> = ({
   item,
   containerWidth,
   onResizeWidth,
-  onResizeLeftEdge,
   onResizeHeight,
   onRemove,
   isMobile,
@@ -67,30 +65,6 @@ export const GridCell: React.FC<Props> = ({
       window.addEventListener('mouseup', onUp);
     },
     [item, colPx, onResizeWidth, isMobile]
-  );
-
-  // FR-014: Left edge drag
-  const onLeftEdgeDown = useCallback(
-    (e: React.MouseEvent) => {
-      if (isMobile) return;
-      e.stopPropagation();
-      e.preventDefault();
-      startXRef.current = e.clientX;
-      startValRef.current = item.x;
-      const onMove = (ev: MouseEvent) => {
-        const delta = ev.clientX - startXRef.current;
-        const colDelta = Math.round(delta / colPx);
-        const newX = startValRef.current + colDelta;
-        onResizeLeftEdge(item.componentId, newX);
-      };
-      const onUp = () => {
-        window.removeEventListener('mousemove', onMove);
-        window.removeEventListener('mouseup', onUp);
-      };
-      window.addEventListener('mousemove', onMove);
-      window.addEventListener('mouseup', onUp);
-    },
-    [item, colPx, onResizeLeftEdge, isMobile]
   );
 
   // FR-017: Bottom edge drag
@@ -175,16 +149,6 @@ export const GridCell: React.FC<Props> = ({
           onMouseDown={onRightEdgeDown}
           style={{
             position: 'absolute', top: 0, right: 0, width: 6, height: '100%',
-            cursor: 'ew-resize', background: 'rgba(255,255,255,0.15)',
-          }}
-        />
-      )}
-      {/* FR-014: Left edge handle */}
-      {!isMobile && (
-        <div
-          onMouseDown={onLeftEdgeDown}
-          style={{
-            position: 'absolute', top: 0, left: 0, width: 6, height: '100%',
             cursor: 'ew-resize', background: 'rgba(255,255,255,0.15)',
           }}
         />

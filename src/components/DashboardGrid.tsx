@@ -4,7 +4,6 @@ import type { GridItem, ComponentType } from '../types';
 import { CELL_HEIGHT_PX, GRID_COLUMNS, MOBILE_BREAKPOINT_PX } from '../constants';
 import {
   resizeWidth,
-  resizeLeftEdge,
   resizeHeight,
   addComponent,
   removeComponent,
@@ -83,6 +82,26 @@ function computeDropZones(items: GridItem[], _dragWidth: number, dragHeight: num
     }
   }
 
+  // "Below" zones: for each component, if there's open space directly below it
+  for (const item of items) {
+    const belowY = item.y + item.height;
+    // Check if any component occupies the space at belowY within this item's x range
+    const blocked = items.some(other =>
+      other.componentId !== item.componentId &&
+      other.y <= belowY && belowY < other.y + other.height &&
+      other.x < item.x + item.width && item.x < other.x + other.width
+    );
+    if (!blocked) {
+      zones.push({
+        x: item.x,
+        y: belowY,
+        width: item.width,
+        height: dragHeight,
+        label: `Below ${item.componentType}`,
+      });
+    }
+  }
+
   // Between row groups
   const occupiedYs = [...new Set(items.flatMap(i => Array.from({ length: i.height }, (_, k) => i.y + k)))].sort((a, b) => a - b);
   if (occupiedYs.length > 0) {
@@ -154,10 +173,6 @@ export const DashboardGrid: React.FC<Props> = ({ items, onChange }) => {
     (id: string, newWidth: number) => onChange(resizeWidth(items, id, newWidth)),
     [items, onChange]
   );
-  const handleResizeLeftEdge = useCallback(
-    (id: string, newX: number) => onChange(resizeLeftEdge(items, id, newX)),
-    [items, onChange]
-  );
   const handleResizeHeight = useCallback(
     (id: string, newHeight: number) => onChange(resizeHeight(items, id, newHeight)),
     [items, onChange]
@@ -201,8 +216,11 @@ export const DashboardGrid: React.FC<Props> = ({ items, onChange }) => {
         // Snap to hovered drop zone if cursor is over one
         const zoneIdx = hitTestZone(dropZonesRef.current, relX, relY, colPx);
         const zone = zoneIdx >= 0 ? dropZonesRef.current[zoneIdx] : null;
-        const dropX = zone ? zone.x : Math.max(0, Math.min(Math.floor(relX / colPx), GRID_COLUMNS - 1));
+        const rawDropX = zone ? zone.x : Math.max(0, Math.min(Math.floor(relX / colPx), GRID_COLUMNS - 1));
         const dropY = zone ? zone.y : Math.max(0, Math.floor(relY / CELL_HEIGHT_PX));
+
+        // For right-edge drops, right-align the component
+        const dropX = zone?.label === 'Right edge' ? GRID_COLUMNS : rawDropX;
 
         if (monitor.getItemType() === 'PALETTE_ITEM') {
           const newItem: GridItem = {
@@ -348,7 +366,6 @@ export const DashboardGrid: React.FC<Props> = ({ items, onChange }) => {
           item={item}
           containerWidth={containerWidth}
           onResizeWidth={handleResizeWidth}
-          onResizeLeftEdge={handleResizeLeftEdge}
           onResizeHeight={handleResizeHeight}
           onRemove={handleRemove}
           isMobile={isMobile}

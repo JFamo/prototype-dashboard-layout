@@ -78,26 +78,24 @@ function solveLayout(items: GridItem[], resizedId?: string): GridItem[] {
     }
   }
 
-  // Step 2: Assign x positions by packing left-to-right.
-  // The resizedId component's requested x determines its position in the sort order
-  // (i.e., where it falls relative to other components), but all components are
-  // packed sequentially to avoid gaps.
-  // Process per-row-group: components sharing the same y-span are packed together.
+  // Right-align: if any component's x + width exceeds grid, shift it left
+  for (const comp of result) {
+    if (comp.x + comp.width > GRID_COLUMNS) {
+      comp.x = GRID_COLUMNS - comp.width;
+    }
+  }
+
+  // Step 2: Assign x positions. Sort by y then x (resizedId wins ties).
+  // resizedId uses nearest-fit from its requested x; others use leftmost-fit.
   const placed = new Set<string>();
   const occupied = new Map<number, { start: number; end: number; id: string }[]>();
 
-  // Process multi-row components first (more constrained), but resizedId gets
-  // its sort position based on its requested x.
   const byPriority = [...result].sort((a, b) => {
     if (a.y !== b.y) return a.y - b.y;
     if (a.x !== b.x) return a.x - b.x;
-    // resizedId wins ties — user placed it here intentionally
     if (a.componentId === resizedId) return -1;
     if (b.componentId === resizedId) return 1;
-    // Multi-row before single-row (more constrained)
-    const aMulti = a.height > 1 ? 0 : 1;
-    const bMulti = b.height > 1 ? 0 : 1;
-    return aMulti - bMulti;
+    return 0;
   });
 
   for (const comp of byPriority) {
@@ -105,22 +103,43 @@ function solveLayout(items: GridItem[], resizedId?: string): GridItem[] {
     placed.add(comp.componentId);
     const ref = result.find(r => r.componentId === comp.componentId)!;
 
-    // Find the leftmost x where this component fits across ALL its rows
+    // Right-aligned components (right edge touches grid edge): scan from their x.
+    // All others: leftmost fit from x:0.
     let bestX = -1;
-    for (let tryX = 0; tryX <= GRID_COLUMNS - ref.width; tryX++) {
-      let fits = true;
-      for (let r = ref.y; r < ref.y + ref.height; r++) {
-        const rowOcc = occupied.get(r) || [];
-        for (const occ of rowOcc) {
-          if (tryX < occ.end && tryX + ref.width > occ.start) {
-            fits = false;
-            tryX = Math.max(tryX, occ.end - 1);
-            break;
+    const isRightAligned = ref.componentId === resizedId && ref.x + ref.width === GRID_COLUMNS;
+    if (isRightAligned) {
+      for (let tryX = ref.x; tryX <= GRID_COLUMNS - ref.width; tryX++) {
+        let fits = true;
+        for (let r = ref.y; r < ref.y + ref.height; r++) {
+          const rowOcc = occupied.get(r) || [];
+          for (const occ of rowOcc) {
+            if (tryX < occ.end && tryX + ref.width > occ.start) {
+              fits = false;
+              tryX = Math.max(tryX, occ.end - 1);
+              break;
+            }
           }
+          if (!fits) break;
         }
-        if (!fits) break;
+        if (fits) { bestX = tryX; break; }
       }
-      if (fits) { bestX = tryX; break; }
+    }
+    if (bestX < 0) {
+      for (let tryX = 0; tryX <= GRID_COLUMNS - ref.width; tryX++) {
+        let fits = true;
+        for (let r = ref.y; r < ref.y + ref.height; r++) {
+          const rowOcc = occupied.get(r) || [];
+          for (const occ of rowOcc) {
+            if (tryX < occ.end && tryX + ref.width > occ.start) {
+              fits = false;
+              tryX = Math.max(tryX, occ.end - 1);
+              break;
+            }
+          }
+          if (!fits) break;
+        }
+        if (fits) { bestX = tryX; break; }
+      }
     }
     if (bestX < 0) bestX = 0;
     ref.x = bestX;
